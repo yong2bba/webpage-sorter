@@ -1,21 +1,42 @@
 # Webpage Sorter
 
-A token-frugal webpage intake and judgment queue for AI agents.
+Sort URLs before your agent burns tokens on them.
 
 ![Demo: URL drop to cheap triage to Markdown projection](docs/assets/demo.gif)
 
-Webpage Sorter helps an agent avoid spending expensive reasoning tokens on every URL. It performs a cheap first pass, stores structured evidence, and escalates only uncertain or valuable pages to a judgment queue.
+Webpage Sorter is a cheap-first intake layer for AI agents. Drop in a URL; it normalizes the source, runs a low-cost first pass, stores evidence, and only escalates pages that actually need judgment.
 
-## Why
+Use it before RAG, wiki building, research agents, or Slack/Discord URL collectors. The point is simple: most URLs do not deserve a full reasoning run.
 
-Agents waste tokens when every dropped URL is handled as a full conversation or deep research task. Most pages can be classified cheaply:
+## The problem
 
-- `self_close`: obvious, enough evidence, no escalation needed
-- `judgment_requested`: uncertain, valuable, risky, or needs human/senior-agent review
-- `archive`: approved for long-term preservation
+Agents are bad at saying "not worth reading yet." Give them a link and they tend to start researching, summarizing, indexing, or chatting about it. That gets expensive fast.
+
+Webpage Sorter adds a gate in front:
+
+```text
+URL in → cheap triage → structured record → decision
+```
+
+The decision is explicit:
+
+- `self_close`: enough evidence, no escalation needed
+- `judgment_requested`: uncertain, valuable, risky, or worth human/senior-agent review
+- `archive`: approved for preservation
 - `reject` / `blocked`: not useful or inaccessible
 
-Webpage Sorter is an intake control plane before RAG, wiki-building, or long-form research.
+The database stays the source of truth. Markdown and wiki pages are human-readable projections.
+
+## What it gives you
+
+- A SQLite demo that runs with no credentials
+- A Hermes plugin with `webpage_sorter_*` tool aliases
+- Legacy `source_lab_*` tool names for compatibility
+- Cheap-first URL analysis hooks
+- A judgment queue for uncertain pages
+- Markdown/Git projection for source reports and queue pages
+- Optional PostgreSQL storage for production collector flows
+- A deterministic Slack auto-intake hook for collector profiles
 
 ## Architecture
 
@@ -23,19 +44,17 @@ Webpage Sorter is an intake control plane before RAG, wiki-building, or long-for
 flowchart LR
     A[URL drop / CLI / chat hook] --> B[Cheap first analysis]
     B --> C[Canonical source registry]
-    C --> D{Branch decision}
-    D -->|self_close| E[Source report projection]
+    C --> D{Decision}
+    D -->|self_close| E[Source report]
     D -->|judgment_requested| F[Judgment queue]
-    F --> G[Human or senior-agent decision]
+    F --> G[Human or senior agent]
     G --> E
     E --> H[Markdown / Git / Wiki]
 ```
 
-The database is the source of truth. Markdown/wiki pages are projections for humans.
+## Quickstart: no Slack, no Postgres, no LLM key
 
-## Quickstart
-
-The SQLite-only demo uses deterministic local analysis. It does **not** need Slack, PostgreSQL, credentials, or a live LLM provider.
+The demo uses SQLite and deterministic local analysis. It does not need Slack, PostgreSQL, credentials, or a live model provider.
 
 ```bash
 git clone https://github.com/yong2bba/webpage-sorter.git
@@ -45,7 +64,7 @@ python3 -m webpage_sorter_cli demo https://github.com/D4Vinci/Scrapling --db-pat
 python3 -m webpage_sorter_cli queue --db-path out/demo.db
 ```
 
-Generated artifacts:
+Generated files:
 
 ```text
 out/demo.db
@@ -53,23 +72,23 @@ out/sourcelab/sources/github/d4vinci-scrapling.md
 out/sourcelab/queue/judgmentrequested.md
 ```
 
-To see a pending judgment queue item:
+Try a low-confidence page to see the judgment queue path:
 
 ```bash
 python3 -m webpage_sorter_cli demo https://example.com/uncertain --confidence 0.2 --db-path out/demo.db --out-dir out
 python3 -m webpage_sorter_cli queue --db-path out/demo.db
 ```
 
-## Current package shape
+## Package status
 
-This repository is the first extraction from a working SourceLab collector. Some module/tool names still use `source_lab_*` for compatibility with the original Hermes plugin, while the project name and product direction are **Webpage Sorter**. New Hermes tool aliases are also registered as `webpage_sorter_*`.
+This repo is the first public extraction from a working SourceLab collector. Some internals still use `source_lab_*` names because the original runtime depended on them. The public project name is Webpage Sorter, and new Hermes-facing aliases are registered as `webpage_sorter_*`.
 
 Included:
 
 - Hermes plugin entrypoint: `__init__.py`
-- Core intake/branching/storage logic: `source_lab_core/`
+- Core intake, branching, validation, and storage logic: `source_lab_core/`
 - SQLite queue storage
-- PostgreSQL collector flow
+- Optional PostgreSQL collector flow storage
 - Markdown/Git wiki projection
 - Slack deterministic auto-intake hook
 - SQLite-only demo CLI: `webpage_sorter_cli.py`
@@ -82,9 +101,11 @@ Not included:
 - Slack tokens or signing secrets
 - database credentials
 - private runtime logs
-- local profile directories
+- local Hermes profile directories
 
-## Minimal Hermes plugin setup
+## Hermes plugin setup
+
+Link the repo into your Hermes plugin directory:
 
 ```bash
 mkdir -p ~/.hermes/plugins
@@ -92,7 +113,7 @@ ln -s /path/to/webpage-sorter ~/.hermes/plugins/webpage_sorter
 hermes tools | grep webpage_sorter
 ```
 
-For a dedicated collector profile, link it into that profile's plugin directory instead:
+For a dedicated collector profile:
 
 ```bash
 mkdir -p ~/.hermes/profiles/collector/plugins
@@ -109,7 +130,7 @@ webpage_sorter_queue_list
 webpage_sorter_process_result
 ```
 
-Legacy compatibility names remain available:
+Legacy compatibility names:
 
 ```text
 source_lab_analyze_url
@@ -122,13 +143,13 @@ source_lab_process_result
 
 See `.env.example`.
 
-Core storage can run with SQLite by default. PostgreSQL is optional:
+SQLite works by default. PostgreSQL is optional:
 
 ```bash
 WEBPAGE_SORTER_DATABASE_URL=<postgres connection string>
 ```
 
-Legacy `SOURCELAB_*` environment names are still accepted by the extracted plugin for compatibility.
+Legacy `SOURCELAB_*` environment names are still accepted for compatibility with the original collector.
 
 ## Tests
 
@@ -140,13 +161,13 @@ PostgreSQL tests are skipped unless `SOURCELAB_TEST_DATABASE_URL` is set.
 
 ## Operational proof
 
-The sanitized smoke report is in:
+A sanitized smoke report lives here:
 
 ```text
 docs/operations/slack-auto-intake-smoke-2026-06-01.md
 ```
 
-It verifies the path:
+It verifies this production path:
 
 ```text
 Slack live message
