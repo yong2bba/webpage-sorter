@@ -1,0 +1,12 @@
+name: webpage_sorter
+version: 0.1.0
+description: "Token-frugal URL intake, classification, judgment queue, and Markdown projection tools for AI agents."
+author: "Yongjin / YongYongBot"
+kind: standalone
+provides_tools:
+  - source_lab_analyze_url
+  - source_lab_intake_url
+  - source_lab_queue_list
+  - source_lab_process_result
+provides_auxiliary_tasks:
+  - source_lab_low_analysis
