@@ -29,6 +29,7 @@ try:
     from .source_lab_core.postgres_collector_flow import PostgresCollectorFlowRepository
     from .source_lab_core.queue_storage import QueueStorage
     from .source_lab_core.result_processing import ResultProcessor
+    from .source_lab_core.social_collectors import build_seed_analysis, collect_social_items
     from .source_lab_core.wiki_projection import WikiProjectionRenderer
 except ImportError:  # Allows pytest to import the repository-root plugin file directly.
     from source_lab_core.intake import intake_url
@@ -42,6 +43,7 @@ except ImportError:  # Allows pytest to import the repository-root plugin file d
     from source_lab_core.postgres_collector_flow import PostgresCollectorFlowRepository
     from source_lab_core.queue_storage import QueueStorage
     from source_lab_core.result_processing import ResultProcessor
+    from source_lab_core.social_collectors import build_seed_analysis, collect_social_items
     from source_lab_core.wiki_projection import WikiProjectionRenderer
 
 logger = logging.getLogger(__name__)
@@ -418,6 +420,60 @@ def handle_source_lab_analyze_url(args: dict, **kwargs) -> str:
     return _json(payload)
 
 
+def handle_source_lab_collect_social(args: dict, **kwargs) -> str:
+    """Collect X/Reddit social items and optionally feed seed analyses into SourceLab intake."""
+    source = str(args.get("source") or "").strip()
+    target = str(args.get("target") or args.get("query") or args.get("url") or "").strip()
+    limit = int(args.get("limit") or 10)
+    run_intake = bool(args.get("run_intake", False))
+    enqueue = bool(args.get("enqueue", True))
+    threshold = float(args.get("confidence_threshold", 0.8))
+    requested_by = str(args.get("requested_by") or "source_lab_social_collector")
+
+    if not source or not target:
+        return _json({"success": False, "error": "source and target are required"})
+
+    try:
+        items = collect_social_items(source, target, limit=limit)
+    except Exception as exc:
+        return _json({
+            "success": False,
+            "error": f"social collection failed: {type(exc).__name__}: {exc}",
+            "source": source,
+            "target": target,
+        })
+
+    analyses = [build_seed_analysis(item) for item in items]
+    payload: Dict[str, Any] = {
+        "success": True,
+        "source": source,
+        "target": target,
+        "count": len(items),
+        "items": [item.to_dict() for item in items],
+        "analyses": analyses,
+    }
+
+    if not run_intake:
+        return _json(payload)
+
+    intake_results = []
+    for item, analysis in zip(items, analyses):
+        intake_args = dict(args)
+        intake_args["url"] = item.url
+        intake_args["analysis"] = analysis
+        intake_args["enqueue"] = enqueue
+        intake_args["confidence_threshold"] = threshold
+        intake_args["requested_by"] = requested_by
+        intake_args.setdefault("submitted_via", "social_collector")
+        intake_results.append(json.loads(handle_source_lab_intake_url(intake_args, **kwargs)))
+    payload["intake_results"] = intake_results
+    payload["success"] = all(bool(result.get("success")) for result in intake_results)
+    return _json(payload)
+
+
+handle_webpage_sorter_collect_social = handle_source_lab_collect_social
+
+
 def handle_source_lab_queue_list(args: dict, **kwargs) -> str:
     limit = int(args.get("limit") or 100)
     storage = _with_storage(args)
@@ -476,6 +532,7 @@ def handle_source_lab_process_result(args: dict, **kwargs) -> str:
 
 handle_webpage_sorter_analyze_url = handle_source_lab_analyze_url
 handle_webpage_sorter_intake_url = handle_source_lab_intake_url
+handle_webpage_sorter_collect_social = handle_source_lab_collect_social
 handle_webpage_sorter_queue_list = handle_source_lab_queue_list
 handle_webpage_sorter_process_result = handle_source_lab_process_result
 
@@ -528,6 +585,34 @@ ANALYZE_SCHEMA = {
         "required": ["url"],
     },
 }
+
+COLLECT_SOCIAL_SCHEMA = {
+    "name": "source_lab_collect_social",
+    "description": "Collect X/Twitter or Reddit items through configured read-only CLI adapters, then optionally feed seed analyses into SourceLab intake.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source": {
+                "type": "string",
+                "enum": ["x_search", "x_user_posts", "x_tweet", "reddit_search", "reddit_subreddit", "reddit_read"],
+                "description": "Social adapter to run.",
+            },
+            "target": {"type": "string", "description": "Search query, username/subreddit, tweet URL/ID, or Reddit post ID."},
+            "limit": {"type": "integer", "description": "Maximum items for list/search adapters.", "default": 10},
+            "run_intake": {"type": "boolean", "description": "Whether to feed collected items into source_lab_intake_url using conservative seed analyses.", "default": False},
+            "enqueue": {"type": "boolean", "description": "Whether intake should persist self_close/judgment results when run_intake is true.", "default": True},
+            "confidence_threshold": {"type": "number", "description": "Confidence threshold for intake branching.", "default": 0.8},
+            "requested_by": {"type": "string", "description": "Agent/user id recorded in judgment request payload.", "default": "source_lab_social_collector"},
+            "database_url": {"type": "string", "description": "Optional PostgreSQL DSN. Defaults to SOURCELAB_DATABASE_URL when set."},
+            "wiki_repo_path": {"type": "string", "description": "Optional Markdown/Git repository path for generated projections. Defaults to WEBPAGE_SORTER_WIKI_REPO_PATH or SOURCELAB_WIKI_REPO_PATH."},
+            "wiki_base_url": {"type": "string", "description": "Optional public wiki/report base URL. Defaults to WEBPAGE_SORTER_WIKI_BASE_URL or SOURCELAB_WIKI_BASE_URL."},
+            "wiki_commit": {"type": "boolean", "description": "Whether to git commit generated wiki projections. Defaults to true unless SOURCELAB_WIKI_COMMIT disables it."},
+            "db_path": {"type": "string", "description": "Optional SQLite queue path when PostgreSQL is not configured; defaults to $HERMES_HOME/state/source_lab/queue.db."},
+        },
+        "required": ["source", "target"],
+    },
+}
+
 
 QUEUE_LIST_SCHEMA = {
     "name": "source_lab_queue_list",
@@ -618,6 +703,15 @@ def register(ctx) -> None:
         handler=handle_source_lab_intake_url,
         description="SourceLab URL intake and branch decision",
         emoji="🧪",
+    )
+    _register_tool_pair(
+        ctx,
+        legacy_name="source_lab_collect_social",
+        alias_name="webpage_sorter_collect_social",
+        schema=COLLECT_SOCIAL_SCHEMA,
+        handler=handle_source_lab_collect_social,
+        description="SourceLab X/Reddit social-source collection into sorter seed analysis",
+        emoji="🌐",
     )
     _register_tool_pair(
         ctx,
